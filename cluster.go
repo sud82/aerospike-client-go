@@ -235,7 +235,7 @@ func (clstr *Cluster) tend() error {
 
 	// All node additions/deletions are performed in tend goroutine.
 	// If active nodes don't exist, seed cluster.
-	if len(nodes) == 0 {
+	if len(nodes) == 0 || (clstr.clientPolicy.SeedOnlyCluster && len(nodes) < clstr.GetSeedCount()) {
 		logger.Logger.Info("No connections available; seeding...")
 		if newNodesFound, err := clstr.seedNodes(); !newNodesFound {
 			return err
@@ -308,7 +308,7 @@ func (clstr *Cluster) tend() error {
 			defer wg.Done()
 			for _, host := range __peer.hosts {
 				// attempt connection to the host
-				nv := nodeValidator{}
+				nv := nodeValidator{seedOnlyCluster: clstr.clientPolicy.SeedOnlyCluster}
 				if err := nv.validateNode(clstr, host); err != nil {
 					logger.Logger.Warn("Add node `%s` failed: `%s`", host, err)
 					continue
@@ -609,7 +609,7 @@ func (clstr *Cluster) seedNodes() (bool, error) {
 	for i, seed := range seedArray {
 		go func(index int, seed *Host) {
 			nodesToAdd := make(nodesToAddT, 128)
-			nv := nodeValidator{}
+			nv := nodeValidator{seedOnlyCluster: clstr.clientPolicy.SeedOnlyCluster}
 			err := nv.seedNodes(clstr, seed, nodesToAdd)
 			if err != nil {
 				logger.Logger.Warn("Seed %s failed: %s", seed.String(), err.Error())
@@ -684,9 +684,14 @@ func (clstr *Cluster) addAlias(host *Host, node *Node) {
 }
 
 func (clstr *Cluster) findNodesToRemove(refreshCount int) []*Node {
-	nodes := clstr.GetNodes()
-
 	removeList := []*Node{}
+
+	if clstr.clientPolicy.SeedOnlyCluster {
+		// Don't remove any node even if its bad or inactive.
+		return removeList
+	}
+
+	nodes := clstr.GetNodes()
 
 	for _, node := range nodes {
 		if !node.IsActive() {
@@ -744,6 +749,11 @@ func (clstr *Cluster) findNodeInPartitionMap(filter *Node) bool {
 func (clstr *Cluster) addNodes(nodesToAdd map[string]*Node) {
 	clstr.nodes.Update(func(val interface{}) (interface{}, error) {
 		nodes := val.([]*Node)
+		if clstr.clientPolicy.SeedOnlyCluster && clstr.GetSeedCount() == len(nodes) {
+			// Don't add new nodes.
+			return nodes, nil
+		}
+
 		for _, node := range nodesToAdd {
 			if node != nil && !clstr.findNodeName(nodes, node.name) {
 				logger.Logger.Debug("Adding node %s (%s) to the cluster.", node.name, node.host.String())
@@ -849,6 +859,16 @@ func (clstr *Cluster) GetRandomNode() (*Node, error) {
 func (clstr *Cluster) GetNodes() []*Node {
 	// Must copy array reference for copy on write semantics to work.
 	return clstr.nodes.Get().([]*Node)
+}
+
+// GetSeedCount is the count of seed nodes
+func (clstr *Cluster) GetSeedCount() int {
+	res, _ := clstr.seeds.GetSyncedVia(func(val interface{}) (interface{}, error) {
+		seeds := val.([]*Host)
+		return len(seeds), nil
+	})
+
+	return res.(int)
 }
 
 // GetSeeds returns a list of all seed nodes in the cluster
